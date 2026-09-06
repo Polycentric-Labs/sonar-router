@@ -140,8 +140,8 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-## AI assistance
+## AI Assistance
 
 This project was developed alongside AI platforms.
 
-Models used: Claude Opus 4.6, Claude Opus 4.7, Sonar Deep Research
+Details, including the tools used: [`docs/ai-assistance.md`](docs/ai-assistance.md).
