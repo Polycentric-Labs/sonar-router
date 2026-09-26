@@ -25,13 +25,30 @@ In short: the timeout problem is solved, but the data-quality problem for niche/
 
 | Query shape | Tool | Cost | Latency | Caveat |
 |---|---|---|---|---|
-| **Broad academic/established topic** (e.g., "how does Envoy credential_injector work", "OWASP Top 10", "what is SLSA L3") | `perplexity_research_start` (Sonar Deep Research) | ~$1-3 | 5-15 min | async-job tools required for non-timeout; avoid if query mentions ≥3 specific proper nouns |
-| **Specific factual question** (e.g., "does `clawlock` plugin exist?", "what's its install command?") | `perplexity_ask` (Sonar Pro) | ~$0.05-0.20 | 5-30 sec | First choice for plugin / repo verification |
-| **Logical analysis / comparison** (e.g., "compare X vs Y given these constraints") | `perplexity_reason` (Sonar Reasoning Pro) | ~$0.10-0.50 | 30-120 sec | Use when synthesis + reasoning matters more than fresh search |
-| **Find specific URLs / recent news** | `perplexity_search` → `WebFetch` ranked results | ~$0.02 + free fetches | 5-15 sec | Use to discover candidate URLs, then fetch them directly |
+| **Broad academic/established topic** (e.g., "how does Envoy credential_injector work", "OWASP Top 10", "what is SLSA L3") | `perplexity_research_start` (Sonar Deep Research) | live pricing | 60-300 sec | async-job tools required for non-timeout; avoid if query mentions ≥3 specific proper nouns |
+| **Specific factual question** (e.g., "does `clawlock` plugin exist?", "what's its install command?") | `perplexity_ask` (Sonar Pro) | live pricing | 5-30 sec | First choice for plugin / repo verification |
+| **Logical analysis / comparison** (e.g., "compare X vs Y given these constraints") | `perplexity_reason` (Sonar Reasoning Pro) | live pricing | 30-120 sec | Use when synthesis + reasoning matters more than fresh search. A synchronous MCP call times out near 60 s, so a long comparison goes through Sonar reasoning with start and poll (see the chains below) |
+| **Find specific URLs / recent news** | `perplexity_search` → `WebFetch` ranked results | live pricing + free fetches | 5-15 sec | Use to discover candidate URLs, then fetch them directly |
 | **Known GitHub repo verification** | `gh api repos/<owner>/<repo>` (no AI) | $0 | <1 sec | Always preferred for "does this repo exist?" / "what's its star count?" |
 | **Known doc page** | `WebFetch <url>` | $0 | 2-10 sec | Authoritative source > AI summary |
 | **Multi-file / multi-repo research** | `Agent` subagent (general-purpose / Explore) | depends on inner calls | 1-10 min | Isolates context, handles many file reads in one shot |
+
+**Prices change, so the matrix no longer carries figures** (the May 2026 ones are gone). Check the live catalogue instead: the `perplexity/*` models on OpenRouter (`search_models` or `get_model_info` on openrouter-multimodal, `list-models` on openrouter-official) and Perplexity's own pricing for the perplexity-mcp tools.
+
+## Ranked chains and `--available` (schema 3, 2026-09-26)
+
+Every route now carries `ranked_tools`, an ordered chain for the query's intent. Each entry names the source it needs: `perplexity-mcp`, `openrouter-multimodal` (Sonar models through OpenRouter), `web` (WebSearch and WebFetch) or `gh`. Pass the sources this session has with `--available` (for example `--available perplexity-mcp,web`), and `recommended_tool` becomes the first ranked tool you can use. `fallback` keeps its schema 2 meaning, the second choice: the schema 2 fallback when you have its source, otherwise the next ranked tool you can use. Without the flag, both keep their schema 2 values (a long comparison, whose Sonar reasoning job ranks first, falls back to `perplexity_reason`), so older callers keep working.
+
+| Intent | Chain, in order |
+|---|---|
+| Recency | `perplexity_search` → `WebFetch`; Sonar (`perplexity/sonar`, which searches the web itself) through openrouter-multimodal; WebSearch; WebFetch |
+| Breadth | `perplexity_research_start`, then `perplexity_research_poll`; Sonar deep research (`perplexity/sonar-deep-research`) through `start_chat_completion`, then `get_chat_completion_status`; WebSearch plus WebFetch |
+| Comparison | `perplexity_reason` for a short one; Sonar reasoning (`perplexity/sonar-reasoning-pro`) through start and poll ranks first for a long one (over 400 characters, or three or more proper-noun signals: repository references, plugin@marketplace names, versions, quoted identifiers, CVE and advisory ids; plain product names do not count), since the synchronous call times out near 60 s; WebSearch plus WebFetch |
+| GitHub references | `gh api`, then WebFetch; without either, `perplexity_ask`, then Sonar through openrouter-multimodal |
+| Per-noun decomposition | unchanged: `perplexity_ask` + `gh api` per noun, then WebFetch on known URLs |
+| No strong signal | `perplexity_ask`; Sonar Pro through openrouter-multimodal; WebSearch; WebFetch |
+
+Unknown source names are ignored and listed in `ignored_tools`. When none of the ranked tools is available, the unfiltered choice stands and the rationale says so.
 
 ## Routing heuristic (the rule)
 
@@ -46,13 +63,13 @@ Then synthesize the verified inputs yourself OR via `perplexity_reason`.
 
 ## Polling discipline (added 2026-05-25, retention bumped to 120 min)
 
-`perplexity_research_start` returns a `jobId` immediately and runs the Sonar Deep Research job asynchronously (typical 10-25 min, outliers 5-30+ min). The result lives in the MCP server's in-memory job store with a retention TTL. **If you don't poll within the TTL window, the job is swept and `perplexity_research_poll` returns `NOT_FOUND` even if Perplexity's side completed it.** This has been observed as a real failure mode when a conversational turn runs longer than the TTL.
+`perplexity_research_start` returns a `jobId` immediately and runs the Sonar Deep Research job asynchronously (typically 60 to 300 s; an earlier note here said 10 to 25 min, which was too long). The result lives in the MCP server's in-memory job store with a retention TTL. **If you don't poll within the TTL window, the job is swept and `perplexity_research_poll` returns `NOT_FOUND` even if Perplexity's side completed it.** This has been observed as a real failure mode when a conversational turn runs longer than the TTL.
 
 **Recommended retention**: **120 min** from `startedAt`. Sweeper typically runs every 5 min and deletes jobs older than the TTL.
 
 ### Operational rules
 
-1. **Poll at least once every 15-20 min** after `_start`. Each poll call blocks up to 45 sec; if status is `IN_PROGRESS` or `CREATED`, call again. With 120-min TTL, polling every 15 min gives you ~6 chances to catch a completed job before sweep.
+1. **Wait about 60 s after `_start`, then poll every 30-60 s.** Each poll call blocks up to 45 sec; if status is `IN_PROGRESS` or `CREATED`, call again. Most jobs complete within 5 minutes, far inside the 120-minute retention.
 2. **Never let more than 60 min elapse between polls.** Even with 120-min TTL, edge cases (sweep timing, clock skew) can shave 10-15 min off the effective window. 60-min poll cadence keeps a 30+ min safety margin.
 3. **Track every active `jobId` in TodoWrite or a tracking task** so a session interruption (new user turn, agent dispatch, sleep) doesn't lose track of in-flight jobs.
 4. **When launching N parallel `_start` calls, plan the polling schedule first.** Calculate worst-case polling load (N jobs × 45 sec each × repeat until COMPLETED) and decide whether to launch fewer streams or batch the polls more aggressively.
@@ -62,19 +79,17 @@ Then synthesize the verified inputs yourself OR via `perplexity_reason`.
 
 | Elapsed since `_start` | Action |
 |---|---|
-| 0-5 min | Don't poll yet (job won't be done; wastes 45 sec) |
-| 5-10 min | First poll; expect `IN_PROGRESS` |
-| 10-30 min | Poll every 5-10 min; most jobs complete here |
-| 30-60 min | Poll every 10-15 min; slow-but-not-stuck jobs land here |
-| 60-90 min | Poll every 15-20 min; verify the job isn't FAILED |
-| 90-120 min | Poll aggressively; less than 30 min until sweep |
+| 0-60 sec | Don't poll yet (the job won't be done; a poll can block 45 sec) |
+| 1-5 min | Poll every 30-60 sec; most jobs complete here |
+| 5-15 min | Poll every 2-3 min; verify the job isn't FAILED |
+| 15-120 min | Unusual; poll every 10-15 min until COMPLETED or FAILED, well before the sweep |
 | >120 min | Job is gone. Relaunch with a tighter prompt or switch to `_ask`/`_reason`. |
 
 ### Guardrails for "ensure success"
 
-- **Tracking**: every `_start` call must be paired with a `TodoWrite` task ("Poll jobId X by [timestamp T0+15min]"). Lose the tracking, lose the job.
+- **Tracking**: every `_start` call must be paired with a `TodoWrite` task ("Poll jobId X by [timestamp T0+1min]"). Lose the tracking, lose the job.
 - **Time-budgeted launches**: don't fire 8 parallel Deep Research streams if the next user turn might be 2 hours away. Cap parallelism at ~3-4 streams per conversational segment.
-- **Compact prompts**: tighter prompts complete in ~10 min (well inside the window) vs. broad prompts that can take 25+ min. Use the "FOR EACH of N projects, give EXACTLY this 6-line block" framing for batched verifications.
+- **Compact prompts**: tighter prompts finish sooner; most jobs take 60 to 300 s, and a broad prompt can run longer. Use the "FOR EACH of N projects, give EXACTLY this 6-line block" framing for batched verifications.
 - **Fallback to `_ask` / `_reason` proactively**: any question that can be answered in 30-90 sec by `_ask` or `_reason` is a better choice than `_start` when polling discipline is in doubt. The decision matrix above captures this routing.
 - **Persist results immediately on COMPLETION**: when `_poll` returns COMPLETED, save the response to disk before the job ages out.
 
@@ -102,7 +117,7 @@ These are documented enhancement candidates for future iterations (e.g., env-ove
 5. `perplexity_ask` for 42crunch / apiiro Claude integration status
 6. Synthesize the verified responses
 
-Per-call cost is ~$0.05-0.20; total <$2 for 6-10 queries. Single Deep Research call would also be ~$3 but returns garbage.
+Each decomposed call is cheap on its own and returns an answer you can check, while the single Deep Research call returns invented specifics. For current prices, check the live catalogue (see the matrix above).
 
 ### Example 2 — Broad technical topic (GOOD use of Deep Research)
 
@@ -122,9 +137,11 @@ Per-call cost is ~$0.05-0.20; total <$2 for 6-10 queries. Single Deep Research c
 
 ```bash
 python scripts/route.py "<query string>"
+python scripts/route.py --available perplexity-mcp,web "<query string>"   # rank only what this session has
+python scripts/route.py --help
 ```
 
-Returns JSON with `recommended_tool`, `fallback`, the full `score` breakdown, a `rationale`, and `schema_version` (currently `2`). The score counts **CVE / security-advisory IDs** (`CVE-`, `GHSA-`, `VMSA-`, `RHSA-`, `USN-`, `DSA-`, `PYSEC-`, `RUSTSEC-`, `GO-`) as proper-noun signals via `cve_advisory_count`, so multi-CVE verification queries route away from Deep Research:
+Returns JSON with `recommended_tool`, `fallback`, `ranked_tools` (see the chains above), the full `score` breakdown, a `rationale`, `schema_version` (currently `3`), `available_tools` (the recognized `--available` names, or `null` without the flag) and `ignored_tools`. The score counts **CVE / security-advisory IDs** (`CVE-`, `GHSA-`, `VMSA-`, `RHSA-`, `USN-`, `DSA-`, `PYSEC-`, `RUSTSEC-`, `GO-`) as proper-noun signals via `cve_advisory_count`, so multi-CVE verification queries route away from Deep Research:
 
 ```json
 {
@@ -143,21 +160,25 @@ Returns JSON with `recommended_tool`, `fallback`, the full `score` breakdown, a 
     "comparison_markers": 0
   },
   "rationale": "7 proper-noun signals (4 GitHub refs, 1 plugin@marketplace refs, 0 quoted IDs, 0 version refs, 2 CVE/advisory IDs) + 1 verification markers. Sonar Deep Research is documented to hallucinate names for queries like this. Decompose into per-noun perplexity_ask or gh api calls.",
-  "schema_version": 2
+  "schema_version": 3,
+  "available_tools": null,
+  "ignored_tools": []
 }
 ```
+
+The output also carries `ranked_tools`, left out above for brevity: here `perplexity_ask + gh api (per-noun decomposition)` (requires `perplexity-mcp`), then `WebFetch on known URLs` (requires `web`), each entry with a `note` on how to use it and `available: true`.
 
 Useful for batch / scripted research planning. Not required for ad-hoc session use — the decision matrix above is sufficient.
 
 ## Tests
 
-`tests/` holds a 30-case pytest suite (run `python -m pytest tests` from the skill root) covering every decision-tree branch, all recognized advisory-ID families, the scoring invariants, and the CLI surface. The CVE cases pin the current calibration: a broad multi-CVE query must route to `perplexity_search` → WebFetch, never to Deep Research.
+`tests/` holds a 51-test pytest suite (run `python -m pytest tests` from the skill root): the 30 schema 2 cases covering every decision-tree branch, all recognized advisory-ID families, the scoring invariants and the CLI surface, plus 21 schema 3 tests for each chain, the `--available` filtering and `--help`. The CVE cases pin the current calibration: a broad multi-CVE query must route to `perplexity_search` → WebFetch, never to Deep Research.
 
 ## What this skill is NOT
 
 - Not a hook (doesn't fire automatically). You can wire it with a cost-gatekeeper hook for runtime soft-warnings if desired.
 - Not a wrapper around Perplexity tools. Use the actual tools after consulting this skill.
-- Not authoritative on cost — Perplexity prices change; the matrix is calibrated to 2026-05 pricing. Validate against current pricing periodically.
+- Not authoritative on cost. Prices change, so the matrix points at the live catalogue rather than carrying figures.
 
 ## Validation
 

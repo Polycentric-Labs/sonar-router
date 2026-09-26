@@ -99,11 +99,14 @@ def test_classify_contract():
     assert set(result) == {
         "recommended_tool",
         "fallback",
+        "ranked_tools",
         "score",
         "rationale",
         "schema_version",
+        "available_tools",
+        "ignored_tools",
     }
-    assert result["schema_version"] == 2
+    assert result["schema_version"] == 3   # schema 3 (2026-09-26) added the last three keys; see test_route_v3.py
     assert set(result["score"]) == {
         "github_ref_count",
         "plugin_marketplace_count",
