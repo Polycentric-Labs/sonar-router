@@ -38,15 +38,17 @@ Sonar Deep Research is still excellent for broad, well-established topics with l
 
 ## The decision matrix
 
-| Query shape | Recommended tool | Approx. cost | Latency | Notes |
+| Query shape | Recommended tool | Cost | Latency | Notes |
 |---|---|---|---|---|
-| Broad academic / established topic (low proper-noun density) | `perplexity_research_start` | ~$1–3 | 5–15 min | Avoid if ≥3 specific proper nouns need verification |
-| Specific factual question ("does X exist?", "what is Y?") | `perplexity_ask` | ~$0.05–0.20 | 5–30 sec | First choice for plugin / repo verification |
-| Logical analysis or comparison ("X vs Y given Z") | `perplexity_reason` | ~$0.10–0.50 | 30–120 sec | Use when reasoning matters more than fresh search |
-| Finding specific URLs / recent news | `perplexity_search` → `WebFetch` | ~$0.02 + free | 5–15 sec | Discover URLs first, then fetch authoritative sources |
+| Broad academic / established topic (low proper-noun density) | `perplexity_research_start` | live pricing | 60-300 sec | Avoid if ≥3 specific proper nouns need verification |
+| Specific factual question ("does X exist?", "what is Y?") | `perplexity_ask` | live pricing | 5-30 sec | First choice for plugin / repo verification |
+| Logical analysis or comparison ("X vs Y given Z") | `perplexity_reason` | live pricing | 30-120 sec | Use when reasoning matters more than fresh search |
+| Finding specific URLs / recent news | `perplexity_search` → `WebFetch` | live pricing + free fetches | 5-15 sec | Discover URLs first, then fetch authoritative sources |
 | Known GitHub repo ("does this repo exist?", star count, metadata) | `gh api repos/<owner>/<repo>` | $0 | <1 sec | Always preferred over AI for GitHub-hosted facts |
 | Known documentation page | `WebFetch <url>` | $0 | 2–10 sec | Primary source beats AI summary |
 | Multi-file / multi-repo research | `Agent` subagent | varies | 1–10 min | Isolates context; handles many reads in one shot |
+
+Prices change, so the matrix no longer carries the May 2026 figures; SKILL.md says where to check the live ones.
 
 ### The routing rule
 
@@ -65,9 +67,14 @@ python scripts/route.py --json '{"query": "compare REST versus GraphQL tradeoffs
 
 # stdin
 echo "overview of SLSA supply-chain levels" | python scripts/route.py
+
+# rank only the tools this session has (perplexity-mcp, openrouter-multimodal, web, gh)
+python scripts/route.py --available openrouter-multimodal,web "what changed in the latest Next.js release"
 ```
 
-### Output (schema_version 2)
+### Output (schema_version 3)
+
+Schema 3 (2026-09-26) adds `ranked_tools`, the ordered tool chain for the query's intent, with the source each entry needs, plus `available_tools` and `ignored_tools`. With `--available`, `recommended_tool` is the first ranked tool from an available source, and `fallback` keeps its schema 2 meaning: the schema 2 fallback when its source is available, otherwise the next available ranked tool. Without it, both keep their schema 2 values. Put `--` before a query that could itself start with `--`. The chains are listed in SKILL.md. `ranked_tools` is left out of the example below for brevity.
 
 ```json
 {
@@ -86,7 +93,9 @@ echo "overview of SLSA supply-chain levels" | python scripts/route.py
     "comparison_markers": 0
   },
   "rationale": "...",
-  "schema_version": 2
+  "schema_version": 3,
+  "available_tools": null,
+  "ignored_tools": []
 }
 ```
 
@@ -122,7 +131,7 @@ The decision tree is evaluated in order; first branch that fires wins:
 python -m pytest tests/ -q
 ```
 
-30 cases covering every decision-tree branch, all recognized advisory-ID families, the scoring invariants, and the CLI argument-parsing surface.
+70 tests: the 30 schema 2 cases covering every decision-tree branch, all recognized advisory-ID families, the scoring invariants and the CLI argument-parsing surface, plus 40 schema 3 tests for each ranked chain, the `--available` filtering and the fallback rule (checked for every combination of sources), argument parsing and `--help`.
 
 ---
 
